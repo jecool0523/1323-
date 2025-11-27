@@ -13,14 +13,18 @@ try:
     import tkinter as tk
     from tkinter import messagebox
     import customtkinter as ctk
-    import matplotlib.pyplot as plt
-    from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+    
+    # [Matplotlib 안전한 임포트]
+    import matplotlib
+    matplotlib.use("TkAgg")
+    from matplotlib.figure import Figure
+    from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk # 툴바 추가
     import networkx as nx
 except ImportError:
     pass
 
 # ==========================================
-# [A] 백엔드 로직 (설정 및 함수들)
+# [A] 백엔드 로직
 # ==========================================
 
 MAX_WORKERS = 25
@@ -85,7 +89,9 @@ def get_links_to_page(page_title):
 def find_shortest_path(start, end, log_func):
     import networkx as nx
     G = nx.Graph()
-    G.add_node(start, type='start'); G.add_node(end, type='end')
+    G.add_node(start, type='start', level=0)
+    G.add_node(end, type='end', level=99) # 목표는 잠시 멀리 둠
+
     queue_f = deque([start]); paths_f = {start: [start]}
     queue_b = deque([end]); paths_b = {end: [end]}
     
@@ -103,11 +109,12 @@ def find_shortest_path(start, end, log_func):
             for i, links in enumerate(results_f):
                 current_page = current_pages_f[i]; current_path = paths_f[current_page]
                 for link_page in links:
-                    if link_page not in G: G.add_node(link_page, type='normal')
+                    if link_page not in G: G.add_node(link_page, type='normal', level=depth)
                     G.add_edge(current_page, link_page)
                     if link_page in paths_b:
                         log_func(f"✨ 교차점 발견! : [{link_page}]")
                         G.nodes[link_page]['type'] = 'intersection'
+                        G.nodes[link_page]['level'] = depth # 교차점 레벨 설정
                         path_f = current_path + [link_page]; path_b = paths_b[link_page]; path_b.reverse()
                         return path_f + path_b[1:], G
                     if link_page not in paths_f: new_path = current_path + [link_page]; paths_f[link_page] = new_path; queue_f.append(link_page)
@@ -119,7 +126,7 @@ def find_shortest_path(start, end, log_func):
             for i, links in enumerate(results_b):
                 current_page = current_pages_b[i]; current_path = paths_b[current_page]
                 for link_page in links:
-                    if link_page not in G: G.add_node(link_page, type='normal')
+                    if link_page not in G: G.add_node(link_page, type='normal', level=depth) # 역방향도 편의상 같은 depth로 표기
                     G.add_edge(current_page, link_page)
                     if link_page in paths_f:
                         log_func(f"✨ 교차점 발견! : [{link_page}]")
@@ -131,113 +138,87 @@ def find_shortest_path(start, end, log_func):
             if depth > 4: log_func("⚠️ 탐색이 너무 깊어져 중단합니다."); return None, G
     return None, G
 
-# 6. 셀레니움 시연 (시네마틱 줌인 & 스무스 스크롤)
+# 6. 셀레니움 시연 (좌표 오차 수정 버전)
 def show_path_selenium(path, log_func):
     from selenium import webdriver
     from selenium.webdriver.common.by import By
     from selenium.webdriver.chrome.service import Service
-    from selenium.webdriver.chrome.options import Options  # [신규] 옵션 설정을 위해 필요
+    from selenium.webdriver.chrome.options import Options
     from webdriver_manager.chrome import ChromeDriverManager
     from selenium.common.exceptions import NoSuchElementException, ElementNotInteractableException
 
     if not path: return
     log_func("\n🎬 [자동 시연] 브라우저를 전체화면으로 실행합니다...")
-    
     driver = None
     try:
-        # [신규] 전체화면 옵션 설정
+        # SSL 오류 방지
+        import os
+        os.environ['WDM_SSL_VERIFY'] = '0'
+        
         chrome_options = Options()
-        chrome_options.add_argument("--start-fullscreen") # F11 누른 효과
-        # chrome_options.add_argument("--kiosk") # (옵션) 주소창도 없는 완전 키오스크 모드 원하면 주석 해제
-
+        chrome_options.add_argument("--start-fullscreen")
         service = Service(ChromeDriverManager().install())
         driver = webdriver.Chrome(service=service, options=chrome_options)
         driver.implicitly_wait(3)
         
-        # 첫 페이지 이동
         driver.get(BASE_URL + path[0])
         log_func(f"📍 시작 페이지 이동: {path[0]}")
         
         for i in range(len(path) - 1):
             curr, next_p = path[i], path[i+1]
             log_func(f"🔎 '{curr}' -> '{next_p}' 찾는 중...")
-            
             link = None
-            
-            # [링크 찾기 전략: Title -> Text -> Partial Text]
             try:
                 content = driver.find_element(By.ID, "mw-content-text")
                 link = content.find_element(By.CSS_SELECTOR, f"a[title='{next_p}']")
             except NoSuchElementException: pass
-
             if not link:
                 try: link = driver.find_element(By.LINK_TEXT, next_p)
                 except NoSuchElementException: pass
-            
             if not link:
                 try: link = driver.find_element(By.PARTIAL_LINK_TEXT, next_p)
                 except NoSuchElementException: pass
 
             if link:
                 try:
-                    # ---------------------------------------------------------
-                    # [연출 시작] 1. 강조 표시 (노랑 배경/빨강 테두리)
-                    # ---------------------------------------------------------
+                    # 1. 강조 효과 (노랑 배경 + 빨강 테두리)
                     driver.execute_script("arguments[0].style.backgroundColor='yellow'; arguments[0].style.border='3px solid red';", link)
                     
-                    # ---------------------------------------------------------
-                    # [연출 2] 부드러운 스크롤 (Smooth Scroll)
-                    # ---------------------------------------------------------
-                    # block: 'center' 옵션으로 링크가 화면 정중앙에 오도록 부드럽게 이동
+                    # 2. 부드러운 스크롤 (화면 중앙으로)
                     driver.execute_script("arguments[0].scrollIntoView({behavior: 'smooth', block: 'center'});", link)
+                    time.sleep(1.5) # 스크롤 이동 대기
                     
-                    # 스크롤이 이동하는 시간을 줘야 하므로 1.5초 대기
-                    time.sleep(1.5)
-
-                    # ---------------------------------------------------------
-                    # [연출 3] 화면 줌인 (Zoom In)
-                    # ---------------------------------------------------------
-                    # 1. 줌 트랜지션 시간 설정 (부드럽게 확대되도록)
+                    # 3. [핵심 수정] 좌표 계산에 '스크롤 위치(window.scrollX/Y)'를 더함
                     driver.execute_script("document.body.style.transition = 'transform 1.0s ease-in-out';")
-                    
-                    # 2. 확대 중심점을 찾은 링크의 위치로 설정
-                    # (getBoundingClientRect로 좌표를 계산하여 transformOrigin 설정)
                     zoom_script = """
-                    var rect = arguments[0].getBoundingClientRect();
-                    var cx = rect.left + rect.width / 2;
-                    var cy = rect.top + rect.height / 2;
+                    var element = arguments[0];
+                    var rect = element.getBoundingClientRect();
+                    
+                    // [수정된 공식]
+                    // 요소의 화면상 좌표(rect) + 현재 스크롤된 거리(window.scroll) = 문서 전체 기준 절대 좌표
+                    var cx = rect.left + window.scrollX + (rect.width / 2);
+                    var cy = rect.top + window.scrollY + (rect.height / 2);
+                    
                     document.body.style.transformOrigin = cx + 'px ' + cy + 'px';
                     document.body.style.transform = 'scale(2.0)';
                     """
                     driver.execute_script(zoom_script, link)
-                    
-                    log_func(f"   ✨ 발견! 줌인 효과 적용 중...")
-                    time.sleep(2) # 확대된 상태로 2초간 보여줌
+                    log_func(f"   ✨ 발견! 정확한 위치로 줌인...")
+                    time.sleep(2)
 
-                    # ---------------------------------------------------------
-                    # [연출 4] 줌 아웃 (원상복구) 및 이동
-                    # ---------------------------------------------------------
-                    # 클릭 안정성을 위해 화면 배율을 원래대로(scale 1.0) 돌려놓습니다.
+                    # 4. 줌 아웃 (원상복구)
                     driver.execute_script("document.body.style.transform = 'scale(1.0)';")
-                    time.sleep(1.0) # 줌아웃 대기
+                    time.sleep(1.0)
 
-                    # 클릭 시도
+                    # 5. 클릭
                     try: link.click()
                     except (ElementNotInteractableException, Exception):
                         driver.execute_script("arguments[0].click();", link)
-                        
-                except Exception as e:
-                    log_func(f"❌ 발견했으나 연출/클릭 중 오류: {e}")
-                    break
-            else:
-                log_func(f"❌ 링크를 화면에서 찾을 수 없음: {next_p}")
-                break
+                except Exception as e: log_func(f"❌ 발견했으나 연출/클릭 중 오류: {e}"); break
+            else: log_func(f"❌ 링크를 화면에서 찾을 수 없음: {next_p}"); break
         
-        log_func("✅ 시연 완료! 10초 후 종료됩니다.")
-        time.sleep(10)
-        
-    except Exception as e:
-        log_func(f"❌ 셀레니움 오류: {e}")
+        log_func("✅ 시연 완료! 10초 후 종료됩니다."); time.sleep(10)
+    except Exception as e: log_func(f"❌ 셀레니움 오류: {e}")
     finally:
         if driver: driver.quit()
         
@@ -252,28 +233,21 @@ class ModernWikiApp:
         
         self.root = ctk.CTk()
         self.root.title("Wiki 6-Degrees Explorer")
-        
-        # 초기 사이즈: 튜토리얼 및 입력창용 (작음)
         self.root.geometry("450x750")
         
-        # 화면 전환을 위한 메인 컨테이너
         self.main_container = ctk.CTkFrame(self.root, corner_radius=0, fg_color="transparent")
         self.main_container.pack(fill="both", expand=True)
 
-        # 1. 튜토리얼 화면 먼저 실행
         self.setup_tutorial_ui()
 
     def setup_tutorial_ui(self):
-        """사용법 안내 화면 (처음 실행 시)"""
         self.clear_frame(self.main_container)
-
         tutorial_frame = ctk.CTkFrame(self.main_container, corner_radius=15)
         tutorial_frame.pack(fill="both", expand=True, padx=20, pady=20)
 
         ctk.CTkLabel(tutorial_frame, text="환영합니다!", font=ctk.CTkFont(size=24, weight="bold")).pack(pady=(40, 10))
         ctk.CTkLabel(tutorial_frame, text="위키백과 6단계 법칙 탐색기", font=ctk.CTkFont(size=16), text_color="gray").pack(pady=(0, 30))
 
-        # 설명 텍스트
         info_text = (
             "이 프로그램은 '고양이'에서 '컴퓨터'까지\n"
             "링크를 타고 이동하는 최단 경로를 찾아줍니다.\n\n"
@@ -290,18 +264,13 @@ class ModernWikiApp:
         start_btn.pack(pady=30, padx=40, fill="x")
 
     def setup_main_ui(self):
-        """메인 프로그램 화면 (입력창 + 로그)"""
         self.clear_frame(self.main_container)
         
-        # --- [왼쪽 패널: 컨트롤 & 로그] ---
-        # 처음에는 화면을 꽉 채우게 설정
         self.left_panel = ctk.CTkFrame(self.main_container, corner_radius=0)
         self.left_panel.pack(side="left", fill="both", expand=True)
         
-        # 타이틀
         ctk.CTkLabel(self.left_panel, text="경로 탐색기", font=ctk.CTkFont(size=20, weight="bold")).pack(pady=(20, 10), padx=20, anchor="w")
 
-        # 입력 영역
         input_frame = ctk.CTkFrame(self.left_panel)
         input_frame.pack(fill="x", padx=20, pady=10)
         
@@ -318,31 +287,24 @@ class ModernWikiApp:
         self.btn_run = ctk.CTkButton(input_frame, text="탐색 시작", command=self.start_process, fg_color="#007bff")
         self.btn_run.pack(fill="x", padx=10, pady=10)
 
-        # 로그 영역
         ctk.CTkLabel(self.left_panel, text="실행 로그", font=ctk.CTkFont(size=12, weight="bold")).pack(pady=(20, 5), padx=20, anchor="w")
         self.log_area = ctk.CTkTextbox(self.left_panel, font=("Consolas", 11))
         self.log_area.pack(fill="both", expand=True, padx=20, pady=(0, 20))
         self.log_area.configure(state="disabled")
 
-        # --- [오른쪽 패널: 그래프 (처음에는 숨김)] ---
-        # pack하지 않고 변수만 만들어둠
         self.right_panel = ctk.CTkFrame(self.main_container, corner_radius=0, fg_color="#2b2b2b")
+        # 툴바를 위한 프레임 추가
+        self.toolbar_frame = ctk.CTkFrame(self.right_panel, fg_color="#2b2b2b", height=40)
+        self.toolbar_frame.pack(side="bottom", fill="x")
         self.canvas_frame = ctk.CTkFrame(self.right_panel, fg_color="#2b2b2b")
         self.canvas_frame.pack(fill="both", expand=True, padx=10, pady=10)
 
     def show_graph_panel(self):
-        """그래프 패널을 활성화하고 창을 넓히는 함수"""
-        # 이미 열려있지 않다면
         if not self.right_panel.winfo_ismapped():
-            # 윈도우 크기 확장 (애니메이션 효과처럼 보임)
             current_x = self.root.winfo_x()
             current_y = self.root.winfo_y()
-            self.root.geometry(f"1100x750+{current_x}+{current_y}")
-            
-            # 오른쪽 패널 붙이기
+            self.root.geometry(f"1200x800+{current_x}+{current_y}") # 사이즈 좀 더 키움
             self.right_panel.pack(side="right", fill="both", expand=True)
-            
-            # 왼쪽 패널 비율 조정 (좁게)
             self.left_panel.pack_configure(expand=False, fill="y", ipadx=0)
             self.left_panel.configure(width=350)
 
@@ -351,6 +313,9 @@ class ModernWikiApp:
             widget.destroy()
 
     def log(self, message):
+        self.root.after(0, lambda: self._log_impl(message))
+
+    def _log_impl(self, message):
         self.log_area.configure(state="normal")
         self.log_area.insert("end", message + "\n")
         self.log_area.see("end")
@@ -359,7 +324,6 @@ class ModernWikiApp:
     def start_process(self):
         start = self.entry_start.get().strip()
         end = self.entry_end.get().strip()
-
         if not start or not end:
             tk.messagebox.showwarning("입력 오류", "문서를 모두 입력해주세요.")
             return
@@ -369,9 +333,9 @@ class ModernWikiApp:
         self.log_area.delete("1.0", "end")
         self.log_area.configure(state="disabled")
         
-        # 이전 그래프 지우기
-        for widget in self.canvas_frame.winfo_children():
-            widget.destroy()
+        # 이전 그래프/툴바 지우기
+        for widget in self.canvas_frame.winfo_children(): widget.destroy()
+        for widget in self.toolbar_frame.winfo_children(): widget.destroy()
 
         thread = threading.Thread(target=self.run_logic, args=(start, end))
         thread.daemon = True
@@ -381,8 +345,7 @@ class ModernWikiApp:
         pkgs = [p for p in REQUIRED_PACKAGES if p != "customtkinter" and p != "matplotlib"]
         if not install_packages(pkgs, self.log):
             self.log("❌ 필수 패키지 설치 실패.")
-            self.reset_button()
-            return
+            self.reset_button(); return
 
         start_time = time.time()
         path, G = find_shortest_path(start, end, self.log)
@@ -392,9 +355,16 @@ class ModernWikiApp:
             self.log(f"\n✅ 경로 발견! ({len(path)-1}단계, {duration:.2f}초)")
             self.log(f"🔗 {' -> '.join(path)}")
             
-            # [수정] 성공 시에만 그래프 패널을 열고 그리기
-            # 메인 스레드에서 UI 업데이트
-            self.root.after(0, lambda: self.reveal_and_draw_graph(G, path))
+            self.log("📊 그래프 배치 계산 중 (왼쪽:시작 -> 오른쪽:목표)...")
+            import networkx as nx
+            try:
+                # [개선] 시작은 왼쪽, 목표는 오른쪽으로 고정하여 방향성 부여
+                fixed_pos = {start: (-1, 0), end: (1, 0)}
+                # k값을 키워(1.5) 노드 간격을 넓힘
+                pos = nx.spring_layout(G, k=1.5, pos=fixed_pos, fixed=[start, end], seed=42)
+                self.root.after(0, lambda: self.reveal_and_draw_graph(G, path, pos))
+            except Exception as e:
+                self.log(f"❌ 그래프 계산 오류: {e}")
             
             show_path_selenium(path, self.log)
         else:
@@ -402,51 +372,72 @@ class ModernWikiApp:
             
         self.reset_button()
 
-    def reveal_and_draw_graph(self, G, path):
-        """창을 넓히고 그래프를 그리는 함수"""
-        self.show_graph_panel() # 패널 열기
-        self.draw_graph_in_gui(G, path) # 그리기
+    def reveal_and_draw_graph(self, G, path, pos):
+        self.show_graph_panel()
+        self.draw_graph_in_gui(G, path, pos)
 
-    def draw_graph_in_gui(self, G, path):
-        import matplotlib.pyplot as plt
+    def draw_graph_in_gui(self, G, path, pos):
+        from matplotlib.figure import Figure
+        from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
         import networkx as nx
-        from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 
-        # 그래프 그리기 로직 (이전과 동일)
-        fig, ax = plt.subplots(figsize=(5, 4), facecolor='#2b2b2b')
+        # 1. Figure 생성
+        fig = Figure(figsize=(5, 4), facecolor='#2b2b2b')
+        ax = fig.add_subplot(111)
         ax.set_axis_off()
-        pos = nx.spring_layout(G, k=0.5, iterations=50)
 
+        # 2. 스타일링
         node_colors = []
         node_sizes = []
+        node_alphas = []
         path_set = set(path)
         
         for node in G.nodes():
             if node in path_set:
-                node_colors.append('#f1c40f')
-                node_sizes.append(300)
+                node_colors.append('#f1c40f') # 경로: 밝은 노랑
+                node_sizes.append(400)       # 크기: 큼
+                node_alphas.append(1.0)      # 투명도: 불투명
             elif G.nodes[node].get('type') == 'start':
                 node_colors.append('#3498db')
-                node_sizes.append(200)
+                node_sizes.append(300)
+                node_alphas.append(1.0)
             elif G.nodes[node].get('type') == 'end':
                 node_colors.append('#e74c3c')
-                node_sizes.append(200)
+                node_sizes.append(300)
+                node_alphas.append(1.0)
             else:
-                node_colors.append('#95a5a6')
-                node_sizes.append(50)
+                node_colors.append('#95a5a6') # 기타: 회색
+                node_sizes.append(50)        # 크기: 작음
+                node_alphas.append(0.3)      # 투명도: 흐릿함
 
-        nx.draw_networkx_edges(G, pos, ax=ax, edge_color='#ecf0f1', alpha=0.3)
-        nx.draw_networkx_nodes(G, pos, ax=ax, node_color=node_colors, node_size=node_sizes)
+        # 3. 그리기 (비경로 요소 먼저 -> 경로 요소 나중에)
+        # 3-1. 흐릿한 엣지 먼저
+        nx.draw_networkx_edges(G, pos, ax=ax, edge_color='#ecf0f1', alpha=0.1, width=0.5)
+        # 3-2. 흐릿한 노드
+        nx.draw_networkx_nodes(G, pos, ax=ax, node_color=node_colors, node_size=node_sizes, alpha=0.3)
         
+        # 3-3. 정답 경로 강조 (맨 위에 덧그리기)
         path_edges = list(zip(path, path[1:]))
-        nx.draw_networkx_edges(G, pos, ax=ax, edgelist=path_edges, edge_color='#f1c40f', width=2)
+        # 경로 노드만 다시 그리기 (불투명하게)
+        path_nodes = list(path_set)
+        nx.draw_networkx_nodes(G, pos, ax=ax, nodelist=path_nodes, node_color='#f1c40f', node_size=400, label="Path")
+        # 경로 엣지 다시 그리기 (두껍게)
+        nx.draw_networkx_edges(G, pos, ax=ax, edgelist=path_edges, edge_color='#f1c40f', width=3.0)
         
-        labels = {node: node for node in G.nodes() if node in path_set or node == path[0] or node == path[-1]}
-        nx.draw_networkx_labels(G, pos, labels, ax=ax, font_size=8, font_color='white', font_family='Malgun Gothic')
+        # 4. 라벨 (경로 노드만 표시)
+        labels = {node: node for node in G.nodes() if node in path_set}
+        # 폰트는 깨짐 방지를 위해 영어 폰트나 시스템 폰트 사용 (한글이 깨질 경우 Malgun Gothic 등 지정)
+        nx.draw_networkx_labels(G, pos, labels, ax=ax, font_size=9, font_color='white', font_weight='bold', font_family='Malgun Gothic')
 
+        # 5. 캔버스 배치
         canvas = FigureCanvasTkAgg(fig, master=self.canvas_frame)
         canvas.draw()
         canvas.get_tk_widget().pack(fill="both", expand=True)
+
+        # 6. [핵심] 툴바 추가 (줌/이동 가능)
+        toolbar = NavigationToolbar2Tk(canvas, self.toolbar_frame)
+        toolbar.update()
+        toolbar.pack(side="bottom", fill="x")
 
     def reset_button(self):
         self.root.after(0, lambda: self.btn_run.configure(state="normal", text="탐색 시작"))
